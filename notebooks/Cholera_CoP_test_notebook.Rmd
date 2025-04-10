@@ -1,0 +1,303 @@
+---
+title: "Correlates of Protection for Cholera study progress report"
+author: "Clifton McKee"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Load libraries
+library(keyring)
+library(REDCapR)
+library(tidyverse)
+library(vroom)
+library(knitr)
+library(kableExtra)
+library(gridExtra)
+
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+```
+
+```{r set-keys}
+# Set REDCap server URI and token for project
+# keyring::key_set(service = "cholera.cop", username = "redcap.uri")
+# keyring::key_set(service = "cholera.cop", username = "redcap.token")
+```
+
+## Study enrollment summary
+
+```{r read-data}
+# Pull in all data from REDCap project
+cholera_cop_dat <- REDCapR::redcap_read(token = keyring::key_get("cholera.cop", "redcap.token"),
+                               redcap_uri = keyring::key_get("cholera.cop", "redcap.uri"),
+                               batch_size = 300L,
+                               interbatch_delay = 0.2,
+                               raw_or_label = "label")$data %>%
+    dplyr::tibble()
+
+# Read codebook for REDCap project
+cholera_cop_codebook <- dplyr::bind_rows(
+    REDCapR::redcap_event_instruments(token = keyring::key_get("cholera.cop", "redcap.token"),
+                                      redcap_uri = keyring::key_get("cholera.cop", "redcap.uri"))$data
+  )
+
+# Read metadata for REDCap project
+cholera_cop_metadata <- REDCapR::redcap_metadata_read(token = keyring::key_get("cholera.cop", "redcap.token"),
+                                          redcap_uri = keyring::key_get("cholera.cop", "redcap.uri"))$data
+```
+
+```{r enrollment-summary}
+# Summary of study enrollment by eligibility
+total <- cholera_cop_dat %>%
+  filter(redcap_event_name == "Screening Visit 1 (Day 0)") %>%
+  group_by(scr_elig_status) %>%
+  summarize(count = n())
+
+# For eligible participants, total count by study arm
+subtotal <- cholera_cop_dat %>%
+  filter(redcap_event_name == "Screening Visit 1 (Day 0)",
+         scr_elig_status == "Eligible") %>%
+  group_by(vxf_arm) %>%
+  summarize(count = n()) %>% 
+  pivot_wider(names_from = vxf_arm,
+              values_from = count) %>% 
+  mutate(Group = "total",
+         Description = "Total eligible participants")
+
+# For eligible participants, count by age bin and study arm
+age_count <- cholera_cop_dat %>%
+  filter(redcap_event_name == "Screening Visit 1 (Day 0)",
+         scr_elig_status == "Eligible") %>%
+  mutate(age_bin = cut(scr_age, c(0, 2, 5, 14, 44), right = FALSE)) %>% 
+  group_by(age_bin, vxf_arm) %>%
+  summarize(count = n()) %>% 
+  pivot_wider(names_from = vxf_arm,
+              values_from = count) %>% 
+  rename(Group = age_bin) %>% 
+  mutate(Description = "Age bin")
+
+# For eligible participants, count by sex and study arm
+sex_count <- cholera_cop_dat %>%
+  filter(redcap_event_name == "Screening Visit 1 (Day 0)",
+         scr_elig_status == "Eligible") %>%
+  group_by(scr_sex, vxf_arm) %>%
+  summarize(count = n()) %>% 
+  pivot_wider(names_from = vxf_arm,
+              values_from = count) %>% 
+  rename(Group = scr_sex) %>% 
+  mutate(Description = "Sex")
+
+# For eligible participants, count by study completion and study arm
+completion <- cholera_cop_dat %>%
+  filter(redcap_event_name == "Screening Visit 1 (Day 0)",
+         scr_elig_status == "Eligible") %>%
+  mutate(pst_complete = as.character(pst_complete)) %>% 
+  replace_na(list(pst_complete = "Subject Status Form not complete")) %>% 
+  group_by(pst_complete, vxf_arm) %>%
+  summarize(count = n()) %>%
+  pivot_wider(names_from = vxf_arm,
+              values_from = count) %>% 
+  rename(Group = pst_complete) %>%
+  mutate(Description = "Completed study")
+
+# For all participants, find individuals who have been lost to follow-up (i.e., no information for >30 days)
+latest_check <- cholera_cop_dat %>%
+  select(record_id, redcap_event_name, scr_elig_status, vxf_arm, contains("date")) %>%
+  group_by(record_id) %>% 
+  summarize(min_date = min(as.matrix(pick(contains("date"))), na.rm = TRUE),
+            max_date = max(as.matrix(pick(contains("date"))), na.rm = TRUE),
+            current_date = Sys.Date(),
+            time_since_last = as.Date(current_date) - as.Date(max_date)) %>% 
+  mutate(past30 = time_since_last > 30) %>%
+  right_join(y = cholera_cop_dat %>% 
+            filter(scr_elig_status == "Eligible"))
+
+# Find how many eligible participants have been lost to follow-up
+over30 <- latest_check %>% 
+  group_by(vxf_arm, past30) %>% 
+  summarize(count = n()) %>% 
+  pivot_wider(names_from = vxf_arm,
+              values_from = count) %>% 
+  rename(Group = past30) %>% 
+  mutate(Description = "Participants with >30 days delayed follow-up")
+
+# Summary table
+study_summary <- rbind(subtotal, age_count, sex_count, completion, over30) %>% 
+  select(Description, Group, `Cholera (OCV)`, `Typhoid (TCV)`) %>% 
+  group_by(Description, Group) %>% 
+  mutate(Total = sum(`Cholera (OCV)`, `Typhoid (TCV)`))
+```
+
+```{r eligibility-table}
+# Output stylized table
+kable(total,
+      caption = "Participant eligibility summary") %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+```{r enrollment-summary-table}
+# Output stylized table
+kable(study_summary,
+      caption = "Study enrollment summary") %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+```{r delayed-participants}
+# Show participants with >30 days delayed follow-up
+latest_check %>% 
+  filter(past30 == TRUE) %>% 
+  select(record_id, scr_elig_status, scr_date, scr_age, scr_sex,
+         vxf_arm, pst_complete, min_date, max_date, current_date, time_since_last, past30) %>% 
+  kable(caption = "Participants with delayed follow-up (>30 days)")
+```
+
+## Weekly diarrhea checks
+
+```{r pull-phone-data}
+# Pull in weekly phone call data from REDCap project
+cholera_phone_dat <- REDCapR::redcap_read(token = keyring::key_get("cholera.cop", "redcap.token"),
+                               redcap_uri = keyring::key_get("cholera.cop", "redcap.uri"),
+                               batch_size = 300L,
+                               events = "weekly_phone_call_arm_1",
+                               interbatch_delay = 0.2,
+                               raw_or_label = "label")$data %>%
+    dplyr::tibble()
+
+# Alternative approach to finding phone call data
+cholera_phone_dat_alt <- cholera_cop_dat %>% 
+  filter(redcap_event_name == "Weekly Phone Call")
+```
+
+```{r phone-calls}
+# Print the number of rows of phone call records
+print(paste("Current phone call records:", nrow(cholera_phone_dat_alt)))
+```
+
+```{r summarize-phone}
+# Aim to summarize raw numbers for:
+# calls made, calls with diarrhea report, calls that resulted in a test, positive tests
+# Output stylized table
+
+# cholera_phone_dat_alt %>% 
+#   group_by(wia_week, vxf_arm) %>% 
+#   summarize(total_calls = sum(!is.na(wia_date)),
+#             calls_w_diarrhea = sum(wia_diarrheanow == "yes", na.rm = TRUE)) %>%
+#   kable(caption = "Weekly phone calls")
+```
+
+## Missing visits
+
+```{r study-timepoint-status}
+# All timepoints for study
+all_events <- expand_grid(
+  record_id = unique(cholera_cop_dat$record_id),
+  redcap_event_name = c(
+    "Screening Visit 1 (Day 0)",
+    "Visit 2 (Day 3)",
+    "Visit 3 (Day 7)",
+    "Visit 4 (Day 14)",
+    "Visit 5 (Day 21) Home Visit",
+    "Visit 6 (Day 44)",
+    "Visit 7 (Day 90)",
+    "Visit 8 (Day 180)",
+    "Visit 9 (Day 270)",
+    "Visit 10 (Day 360)",
+    "Visit 11 (Day 450)",
+    "Visit 12 (Day 540)",
+    "Visit 13 (Day 630)",
+    "Visit 14 (Day 720)"
+  )
+) %>%
+  mutate(
+    nickname = recode(
+      redcap_event_name,
+      "Screening Visit 1 (Day 0)" = "v1_d0",
+      "Visit 2 (Day 3)" = "v2_d3",
+      "Visit 3 (Day 7)" = "v3_d7",
+      "Visit 4 (Day 14)" = "v4_d14",
+      "Visit 5 (Day 21) Home Visit" = "v5_d21",
+      "Visit 6 (Day 44)" = "v6_d44",
+      "Visit 7 (Day 90)" = "v7_d90",
+      "Visit 8 (Day 180)" = "v8_d180",
+      "Visit 9 (Day 270)" = "v9_d270",
+      "Visit 10 (Day 360)" = "v10_d360",
+      "Visit 11 (Day 450)" = "v11_d450",
+      "Visit 12 (Day 540)" = "v12_d540",
+      "Visit 13 (Day 630)" = "v13_d630",
+      "Visit 14 (Day 720)" = "v14_d720"
+    ),
+    days_past = recode(
+      redcap_event_name,
+      "Screening Visit 1 (Day 0)" = 0,
+      "Visit 2 (Day 3)" = 3,
+      "Visit 3 (Day 7)" = 7,
+      "Visit 4 (Day 14)" = 14,
+      "Visit 5 (Day 21) Home Visit" = 21,
+      "Visit 6 (Day 44)" = 44,
+      "Visit 7 (Day 90)" = 90,
+      "Visit 8 (Day 180)" = 180,
+      "Visit 9 (Day 270)" = 270,
+      "Visit 10 (Day 360)" = 360,
+      "Visit 11 (Day 450)" = 450,
+      "Visit 12 (Day 540)" = 540,
+      "Visit 13 (Day 630)" = 630,
+      "Visit 14 (Day 720)" = 720
+    )
+  )
+
+# Merge current records with complete list of timepoints
+merge_events <- right_join(x = cholera_cop_dat, y = all_events) %>%
+  arrange(record_id, days_past) %>%
+  fill(scr_date, .direction = "down") %>%
+  fill(scr_elig_status, .direction = "down") %>%
+  filter(scr_elig_status == "Eligible") %>%
+  group_by(record_id, redcap_event_name, nickname) %>%
+  mutate(
+    plan_date = scr_date + days_past,
+    visit_date = case_when(
+      days_past == 0 ~ scr_date,
+      days_past %in% c(3, 7, 14, 21, 44, 90, 180, 270, 360, 450, 540, 630, 720) ~ fce_date,
+      days_past == 21 ~ scf_vdate
+    ),
+    status = case_when(
+      !is.na(visit_date) &
+        visit_date == plan_date ~ "complete",
+      !is.na(visit_date) &
+        visit_date >= plan_date ~ paste("complete,", visit_date - plan_date, "days delayed"),
+      !is.na(visit_date) &
+        visit_date < plan_date ~ paste("complete,", -(visit_date - plan_date), "days early"),
+      is.na(visit_date) &
+        Sys.Date() >= plan_date ~ paste("late,", Sys.Date() - plan_date, "days overdue"),
+      is.na(visit_date) &
+        Sys.Date() < plan_date ~ paste("pending,", "due in", -(Sys.Date() - plan_date), "days")
+    )
+  ) %>%
+  ungroup() %>%
+  relocate(c(days_past, plan_date, visit_date, status), .after = scr_date)
+
+# Display completion table
+merge_status_table <- merge_events %>% 
+  select(record_id, scr_date, nickname, status) %>% 
+  pivot_wider(names_from = nickname, values_from = status)
+kable(merge_status_table, caption = "Record ID status") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+```{r timepoints-summary}
+# Summary table of timepoints
+merge_events %>% 
+  fill(vxf_arm, .direction = "down") %>% 
+  group_by(days_past, redcap_event_name, vxf_arm) %>% 
+  arrange(days_past) %>% 
+  summarize(n_complete = sum(str_detect(status, "complete")),
+            n_overdue = sum(str_detect(status, "overdue")),
+            n_pending = sum(str_detect(status, "pending"))) %>% 
+  kable(caption = "Record ID status summary") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+## Cohort plot
+
+```{r}
+
+```
