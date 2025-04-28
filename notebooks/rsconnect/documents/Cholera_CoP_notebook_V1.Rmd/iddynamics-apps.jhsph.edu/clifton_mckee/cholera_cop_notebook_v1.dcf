@@ -1,0 +1,12 @@
+name: cholera_cop_notebook_v1
+title: Cholera_CoP_notebook_V1
+username: clifton_mckee
+account: clifton_mckee
+server: iddynamics-apps.jhsph.edu
+hostUrl: https://iddynamics-apps.jhsph.edu/apps/connect/__api__
+appId: 167
+bundleId: 1216
+url: https://iddynamics-apps.jhsph.edu/apps/connect/content/936bab65-eae9-4e70-8858-65f3c3916140/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
