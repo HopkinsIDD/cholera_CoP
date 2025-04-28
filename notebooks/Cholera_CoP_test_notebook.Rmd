@@ -1,7 +1,6 @@
 ---
 title: "Correlates of Protection for Cholera study progress report"
-author: "Clifton McKee"
-date: "`r Sys.Date()`"
+date: "Last updated: `r format(Sys.time(), '%d %B %Y %I:%M %p %Z')`"
 output: html_document
 ---
 
@@ -10,26 +9,30 @@ output: html_document
 library(keyring)
 library(REDCapR)
 library(tidyverse)
-library(vroom)
 library(knitr)
 library(kableExtra)
-library(gridExtra)
+library(downloadthis)
+library(plotly)
 
 knitr::opts_chunk$set(echo = FALSE, message = FALSE)
 ```
 
 ```{r set-keys}
 # Set REDCap server URI and token for project
-# keyring::key_set(service = "cholera.cop", username = "redcap.uri")
-# keyring::key_set(service = "cholera.cop", username = "redcap.token")
+# keyring::key_set(service = "cholera.cop", username = "redcap.uri", keyring = "system")
+# keyring::key_set(service = "cholera.cop", username = "redcap.token", keyring = "system")
+# Sys.setenv(redcap.token = keyring::key_get("cholera.cop", "redcap.token"))
+# Sys.setenv(redcap.uri = keyring::key_get("cholera.cop", "redcap.uri"))
 ```
 
 ## Study enrollment summary
 
+The goal of the tables below are to summarize the current status of subject enrollment into the study and identify any delays in the follow-up visits to current student participants.
+
 ```{r read-data}
 # Pull in all data from REDCap project
-cholera_cop_dat <- REDCapR::redcap_read(token = keyring::key_get("cholera.cop", "redcap.token"),
-                               redcap_uri = keyring::key_get("cholera.cop", "redcap.uri"),
+cholera_cop_dat <- REDCapR::redcap_read(token = Sys.getenv("redcap.token"),
+                               redcap_uri = Sys.getenv("redcap.uri"),
                                batch_size = 300L,
                                interbatch_delay = 0.2,
                                raw_or_label = "label")$data %>%
@@ -37,13 +40,13 @@ cholera_cop_dat <- REDCapR::redcap_read(token = keyring::key_get("cholera.cop", 
 
 # Read codebook for REDCap project
 cholera_cop_codebook <- dplyr::bind_rows(
-    REDCapR::redcap_event_instruments(token = keyring::key_get("cholera.cop", "redcap.token"),
-                                      redcap_uri = keyring::key_get("cholera.cop", "redcap.uri"))$data
+    REDCapR::redcap_event_instruments(token = Sys.getenv("redcap.token"),
+                                      redcap_uri = Sys.getenv("redcap.uri"))$data
   )
 
 # Read metadata for REDCap project
-cholera_cop_metadata <- REDCapR::redcap_metadata_read(token = keyring::key_get("cholera.cop", "redcap.token"),
-                                          redcap_uri = keyring::key_get("cholera.cop", "redcap.uri"))$data
+cholera_cop_metadata <- REDCapR::redcap_metadata_read(token = Sys.getenv("redcap.token"),
+                                          redcap_uri = Sys.getenv("redcap.uri"))$data
 ```
 
 ```{r enrollment-summary}
@@ -108,55 +111,75 @@ latest_check <- cholera_cop_dat %>%
             max_date = max(as.matrix(pick(contains("date"))), na.rm = TRUE),
             current_date = Sys.Date(),
             time_since_last = as.Date(current_date) - as.Date(max_date)) %>% 
-  mutate(past30 = time_since_last > 30) %>%
+  mutate(past14 = time_since_last > 14) %>%
   right_join(y = cholera_cop_dat %>% 
             filter(scr_elig_status == "Eligible"))
 
 # Find how many eligible participants have been lost to follow-up
-over30 <- latest_check %>% 
-  group_by(vxf_arm, past30) %>% 
+over14 <- latest_check %>% 
+  group_by(vxf_arm, past14) %>% 
   summarize(count = n()) %>% 
   pivot_wider(names_from = vxf_arm,
               values_from = count) %>% 
-  rename(Group = past30) %>% 
-  mutate(Description = "Participants with >30 days delayed follow-up")
+  rename(Group = past14) %>% 
+  mutate(Description = "Participants with >14 days delayed follow-up")
 
 # Summary table
-study_summary <- rbind(subtotal, age_count, sex_count, completion, over30) %>% 
+study_summary <- rbind(subtotal, age_count, sex_count, completion, over14) %>% 
   select(Description, Group, `Cholera (OCV)`, `Typhoid (TCV)`) %>% 
   group_by(Description, Group) %>% 
   mutate(Total = sum(`Cholera (OCV)`, `Typhoid (TCV)`))
 ```
 
+Table 1 shows that `r sum(total$count)` individuals have been screened into the study and `r total[total$scr_elig_status != "Eligible",]$count` individual(s) was ineligible.
+
 ```{r eligibility-table}
 # Output stylized table
 kable(total,
-      caption = "Participant eligibility summary") %>% 
+      caption = "Table 1: Participant eligibility summary") %>% 
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
 ```
+
+Table 2 shows that among the `r total[total$scr_elig_status == "Eligible",]$count` eligible study participants, they have been divided into the two arms of the study based on the vaccine administered. Participant demographic data (age and sex) are summarized by study arm. Participants that have completed the study or withdrawn early will complete a Subject Status Form. This table also tracks the individuals that have delayed follow-up (>14 days) based on their scheduled visits from their date of enrollment. At present, there are `r study_summary[study_summary$Description == "Participants with >14 days delayed follow-up" & study_summary$Group == TRUE,]$Total` participants with delayed follow-up visits. These individuals are listed in Table 3.
 
 ```{r enrollment-summary-table}
 # Output stylized table
 kable(study_summary,
-      caption = "Study enrollment summary") %>% 
+      caption = "Table 2: Study enrollment summary") %>% 
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
 ```
 
+Table 3 displays the status of participants with delayed follow-up visits (>14 days). The `min_date` column shows the date of their enrollment and the `max_date` column shows the date of their latest follow-up visit (across all forms). The `pst_column` shows whether these individuals have filled out the Subject Status Form to mark completion or withdrawal from the study.
+
 ```{r delayed-participants}
-# Show participants with >30 days delayed follow-up
+# Show participants with >14 days delayed follow-up
 latest_check %>% 
-  filter(past30 == TRUE) %>% 
+  filter(past14 == TRUE) %>% 
   select(record_id, scr_elig_status, scr_date, scr_age, scr_sex,
-         vxf_arm, pst_complete, min_date, max_date, current_date, time_since_last, past30) %>% 
-  kable(caption = "Participants with delayed follow-up (>30 days)")
+         vxf_arm, pst_complete, min_date, max_date, current_date, time_since_last, past14) %>% 
+  kable(caption = "Table 3: Participants with delayed follow-up (>14 days)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+# Add button to download table
+latest_check %>%
+  download_this(
+    output_name = "Cholera_CoP_delayed_visits",
+    output_extension = ".csv",
+    button_label = "Download data as csv",
+    button_type = "default",
+    has_icon = TRUE,
+    icon = "fa fa-save"
+  )
 ```
 
 ## Weekly diarrhea checks
 
+This notebook will also keep track of the weekly phone calls to participants for diarrhea checks.
+
 ```{r pull-phone-data}
 # Pull in weekly phone call data from REDCap project
-cholera_phone_dat <- REDCapR::redcap_read(token = keyring::key_get("cholera.cop", "redcap.token"),
-                               redcap_uri = keyring::key_get("cholera.cop", "redcap.uri"),
+cholera_phone_dat <- REDCapR::redcap_read(token = Sys.getenv("redcap.token"),
+                               redcap_uri = Sys.getenv("redcap.uri"),
                                batch_size = 300L,
                                events = "weekly_phone_call_arm_1",
                                interbatch_delay = 0.2,
@@ -168,10 +191,14 @@ cholera_phone_dat_alt <- cholera_cop_dat %>%
   filter(redcap_event_name == "Weekly Phone Call")
 ```
 
+At present (`r Sys.Date()`), there have been `r nrow(cholera_phone_dat_alt)` phone calls. However, phone calls were not scheduled to begin until 51 days past subject enrollment, so the earliest phone calls for the first enrollees should occur on `r min(cholera_cop_dat$scr_date, na.rm = TRUE) + 51`.
+
 ```{r phone-calls}
 # Print the number of rows of phone call records
 print(paste("Current phone call records:", nrow(cholera_phone_dat_alt)))
 ```
+
+Once there are phone call data to summarize, we will summarize the number calls made each week and the number calls with diarrhea report.
 
 ```{r summarize-phone}
 # Aim to summarize raw numbers for:
@@ -186,6 +213,8 @@ print(paste("Current phone call records:", nrow(cholera_phone_dat_alt)))
 ```
 
 ## Missing visits
+
+Table 4 and Figure 1 will show the prospectively scheduled visits for each eligible study participants and whether those visits have been completed, still pending, or are overdue. If participants have an overdue visit but have had a more recent visit (≤14 days from today's date), they will not appear in Table 3 above.
 
 ```{r study-timepoint-status}
 # All timepoints for study
@@ -259,6 +288,7 @@ merge_events <- right_join(x = cholera_cop_dat, y = all_events) %>%
       days_past %in% c(3, 7, 14, 21, 44, 90, 180, 270, 360, 450, 540, 630, 720) ~ fce_date,
       days_past == 21 ~ scf_vdate
     ),
+    merge_date = coalesce(visit_date, plan_date),
     status = case_when(
       !is.na(visit_date) &
         visit_date == plan_date ~ "complete",
@@ -270,18 +300,39 @@ merge_events <- right_join(x = cholera_cop_dat, y = all_events) %>%
         Sys.Date() >= plan_date ~ paste("late,", Sys.Date() - plan_date, "days overdue"),
       is.na(visit_date) &
         Sys.Date() < plan_date ~ paste("pending,", "due in", -(Sys.Date() - plan_date), "days")
-    )
+    ),
+    status_group = case_when(str_detect(status, "complete") ~ "complete",
+                             str_detect(status, "pending") ~ "pending",
+                             str_detect(status, "late") ~ "late")
   ) %>%
-  ungroup() %>%
-  relocate(c(days_past, plan_date, visit_date, status), .after = scr_date)
+  group_by(record_id) %>% 
+  mutate(lag_date = coalesce(lag(plan_date), scr_date)) %>% 
+  relocate(c(days_past, plan_date, visit_date, merge_date, lag_date, status), .after = scr_date)
 
 # Display completion table
 merge_status_table <- merge_events %>% 
   select(record_id, scr_date, nickname, status) %>% 
+  mutate(status = cell_spec(status, "html",
+                            color = case_when(str_detect(status, "complete") ~ "green",
+                                              str_detect(status, "pending") ~ "black",
+                                              str_detect(status, "late") ~ "red"))
+  ) %>% 
   pivot_wider(names_from = nickname, values_from = status)
-kable(merge_status_table, caption = "Record ID status") %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+kable(merge_status_table, escape = FALSE,  caption = "Table 4: Record ID status")
+
+# Add button to download table
+merge_status_table %>%
+  download_this(
+    output_name = "Cholera_CoP_participant_visit_status",
+    output_extension = ".csv",
+    button_label = "Download data as csv",
+    button_type = "default",
+    has_icon = TRUE,
+    icon = "fa fa-save"
+  )
 ```
+
+Table 5 summarizes the total missed visits by study vaccine arm and study timepoint.
 
 ```{r timepoints-summary}
 # Summary table of timepoints
@@ -292,12 +343,47 @@ merge_events %>%
   summarize(n_complete = sum(str_detect(status, "complete")),
             n_overdue = sum(str_detect(status, "overdue")),
             n_pending = sum(str_detect(status, "pending"))) %>% 
-  kable(caption = "Record ID status summary") %>%
+  kable(caption = "Table 5: Record ID status summary") %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
 ```
 
-## Cohort plot
+Figure 1 shows the rolling status of visits to enrollees. If the planned visit has been completed, the actual visit date is marked with a filled circle. If the visit is late being completed, the planned date is marked with a triangle. If the planned visit is pending, i.e., it is a future date, the planned date is marked with an open circle. The grey vertical line on the plot is centered at today's date.
 
-```{r}
+```{r cohort-plot, fig.height = 7, fig.width = 9}
+# Cohort plot
+cohort_plot <- merge_events %>% 
+  group_by(days_past, redcap_event_name, vxf_arm) %>% 
+  arrange(desc(days_past)) %>%
+  ggplot() +
+  geom_vline(xintercept = Sys.Date(),
+             color = "grey",
+             linewidth = 3,
+             alpha = 0.5) +
+  geom_rect(aes(
+              xmin = lag_date, xmax = plan_date,
+              ymin = record_id - 0.33, ymax = record_id + 0.33,
+              fill = factor(days_past))) +
+  geom_point(aes(x = merge_date, y = record_id, shape = status_group),
+             size = 0.8) +
+  scale_x_date(name = "Prospective visit date",
+               date_breaks = "2 months",
+               date_labels = "%Y %b") +
+  scale_y_continuous(name = "Participant ID",
+                     breaks = seq(0, sum(total$count), 5)) +
+  scale_shape_manual(name = "Status",
+                     values = c(19, 17, 1)) +
+  scale_fill_viridis_d(name = "Visit (days)", option = "H") +
+  labs(title = "Figure 1: Cohort plot") +
+  theme_bw(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title.position = "plot")
 
+# Make plot interactive with plotly
+cohort_plotly <- ggplotly(cohort_plot)
+for (i in 1:length(cohort_plotly$x$data)){
+    if (!is.null(cohort_plotly$x$data[[i]]$name)){
+        cohort_plotly$x$data[[i]]$name =  gsub("\\(","",str_split(cohort_plotly$x$data[[i]]$name,",")[[1]][1])
+    }
+}
+cohort_plotly
 ```
