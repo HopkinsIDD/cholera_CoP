@@ -335,6 +335,17 @@ merge_events %>%
             n_pending = sum(str_detect(status, "pending"))) %>% 
   kable(caption = "Table 6: Record ID status summary") %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+# Add button to download table
+merge_status_table %>%
+  download_this(
+    output_name = "Cholera_CoP_participant_timepoint_summary",
+    output_extension = ".csv",
+    button_label = "Download data as csv",
+    button_type = "default",
+    has_icon = TRUE,
+    icon = "fa fa-save"
+  )
 ```
 
 Figure 1 shows the rolling status of visits to enrollees. If the planned visit has been completed, the actual visit date is marked with a filled circle. If the visit is late being completed, the planned date is marked with a triangle. If the planned visit is pending, i.e., it is a future date, the planned date is marked with an open circle. The grey vertical line on the plot is centered at today's date.
@@ -342,6 +353,7 @@ Figure 1 shows the rolling status of visits to enrollees. If the planned visit h
 ```{r cohort-plot, fig.height = 9, fig.width = 9}
 # Cohort plot
 cohort_plot <- merge_events %>% 
+  mutate(record_id_factor = as_factor(record_id)) %>%
   group_by(days_past, redcap_event_name, vxf_arm) %>% 
   arrange(desc(days_past)) %>%
   ggplot() +
@@ -351,15 +363,15 @@ cohort_plot <- merge_events %>%
              alpha = 0.5) +
   geom_rect(aes(
               xmin = lag_date, xmax = plan_date,
-              ymin = record_id - 0.33, ymax = record_id + 0.33,
+              ymin = stage(record_id_factor, ymin - 0.33),
+              ymax = stage(record_id_factor, ymax + 0.33),
               fill = factor(days_past))) +
-  geom_point(aes(x = merge_date, y = record_id, shape = status_group, color = status_group),
+  geom_point(aes(x = merge_date, y = record_id_factor, shape = status_group, color = status_group),
              size = 0.8) +
   scale_x_date(name = "Prospective visit date",
                date_breaks = "2 months",
                date_labels = "%Y %b") +
-  scale_y_continuous(name = "Participant ID",
-                     breaks = seq(0, sum(total$count), 5)) +
+  scale_y_discrete(name = "Participant ID") +
   scale_shape_manual(name = "Status",
                      values = c(19, 17, 4, 1)) +
   scale_color_manual(name = "Status",
@@ -368,6 +380,7 @@ cohort_plot <- merge_events %>%
   labs(title = "Figure 1: Cohort plot") +
   theme_bw(base_size = 12) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 6),
         plot.title.position = "plot")
 
 # Make plot interactive with plotly
@@ -381,4 +394,15 @@ cohort_plot <- merge_events %>%
 # Choose which plot version to output
 cohort_plot
 # cohort_plotly
+
+# Add button to download table
+cohort_plot %>%
+  download_this(
+    output_name = "Cholera_CoP_cohort_plot",
+    output_extension = ".png",
+    button_label = "Download plot as png",
+    button_type = "default",
+    has_icon = TRUE,
+    icon = "fa fa-save"
+  )
 ```
