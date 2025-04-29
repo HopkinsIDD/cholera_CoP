@@ -28,7 +28,12 @@ cholera_cop_dat <- REDCapR::redcap_read(token = Sys.getenv("redcap.token"),
                                batch_size = 300L,
                                interbatch_delay = 0.2,
                                raw_or_label = "label")$data %>%
-    dplyr::tibble()
+    dplyr::tibble() %>% 
+  group_by(record_id) %>%
+  mutate(completed = any(pst_complete == "Yes"),
+         withdrawn = any(!is.na(pst_earlytermdate)),
+         completion_form = any(subject_status_form_complete == "Complete")) %>% 
+  replace_na(list(completed = FALSE, withdrawn = FALSE))
 
 # Read codebook for REDCap project
 cholera_cop_codebook <- dplyr::bind_rows(
@@ -86,18 +91,29 @@ sex_count <- cholera_cop_dat %>%
 completion <- cholera_cop_dat %>%
   filter(redcap_event_name == "Screening Visit 1 (Day 0)",
          scr_elig_status == "Eligible") %>%
-  mutate(pst_complete = as.character(pst_complete)) %>% 
-  replace_na(list(pst_complete = "Subject Status Form not complete")) %>% 
-  group_by(pst_complete, vxf_arm) %>%
+  group_by(completed, vxf_arm) %>%
   summarize(count = n()) %>%
   pivot_wider(names_from = vxf_arm,
               values_from = count) %>% 
-  rename(Group = pst_complete) %>%
+  rename(Group = completed) %>%
   mutate(Description = "Completed study")
 
-# For all participants, find individuals who have been lost to follow-up (i.e., no information for >24 days)
+# For eligible participants, count by study completion and study arm
+withdrawn <- cholera_cop_dat %>%
+  filter(redcap_event_name == "Screening Visit 1 (Day 0)",
+         scr_elig_status == "Eligible") %>%
+  group_by(withdrawn, vxf_arm) %>%
+  summarize(count = n()) %>%
+  pivot_wider(names_from = vxf_arm,
+              values_from = count) %>% 
+  rename(Group = withdrawn) %>%
+  mutate(Description = "Withdrawn from study")
+
+# For all current participants, find individuals who have been lost to follow-up (i.e., no information for >24 days)
 latest_check <- cholera_cop_dat %>%
-  select(record_id, redcap_event_name, scr_elig_status, vxf_arm, contains("date")) %>%
+  select(record_id, redcap_event_name, scr_elig_status, vxf_arm, contains("date"),
+         pst_complete, pst_completedate, pst_earlyterm, pst_earlytermdate,
+       subject_status_form_complete) %>% 
   fill(scr_elig_status, vxf_arm, .direction = "down") %>% 
   group_by(record_id, vxf_arm) %>% 
   summarize(min_date = min(as.matrix(pick(contains("date"))), na.rm = TRUE),
@@ -110,15 +126,16 @@ latest_check <- cholera_cop_dat %>%
 
 # Find how many eligible participants have been lost to follow-up
 over24 <- latest_check %>% 
+  filter(withdrawn == FALSE, completed = FALSE) %>% 
   group_by(vxf_arm, past24) %>% 
   summarize(count = n()) %>% 
   pivot_wider(names_from = vxf_arm,
               values_from = count) %>% 
   rename(Group = past24) %>% 
-  mutate(Description = "Participants with >24 days delayed follow-up")
+  mutate(Description = "Current participants with >24 days delayed follow-up")
 
 # Summary table
-study_summary <- rbind(subtotal, age_count, sex_count, completion, over24) %>% 
+study_summary <- rbind(subtotal, age_count, sex_count, completion, withdrawn, over24) %>% 
   select(Description, Group, `Cholera (OCV)`, `Typhoid (TCV)`) %>% 
   group_by(Description, Group) %>% 
   mutate(Total = sum(`Cholera (OCV)`, `Typhoid (TCV)`))
@@ -133,7 +150,7 @@ kable(total,
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
 ```
 
-Table 2 shows that among the `r total[total$scr_elig_status == "Eligible",]$count` eligible study participants, they have been divided into the two arms of the study based on the vaccine administered. Participant demographic data (age and sex) are summarized by study arm. Participants that have completed the study or withdrawn early will complete a Subject Status Form. This table also tracks the individuals that have delayed follow-up (>24 days) based on their scheduled visits from their date of enrollment. At present, there are `r study_summary[study_summary$Description == "Participants with >24 days delayed follow-up" & study_summary$Group == TRUE,]$Total` participants with delayed follow-up visits. These individuals are listed in Table 3.
+Table 2 shows that among the `r total[total$scr_elig_status == "Eligible",]$count` eligible study participants, they have been divided into the two arms of the study based on the vaccine administered. Participant demographic data (age and sex) are summarized by study arm. Participants that have completed the study or withdrawn early will complete a Subject Status Form. This table also tracks the individuals that have delayed follow-up (>24 days) based on their scheduled visits from their date of enrollment.
 
 ```{r enrollment-summary-table}
 # Output stylized table
@@ -142,19 +159,23 @@ kable(study_summary,
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
 ```
 
-Table 3 displays the status of participants with delayed follow-up visits (>24 days). The `min_date` column shows the date of their enrollment and the `max_date` column shows the date of their latest follow-up visit (across all forms). The `pst_column` shows whether these individuals have filled out the Subject Status Form to mark completion or withdrawal from the study.
+Table 3 displays the status of participants with delayed follow-up visits (>24 days). The `min_date` column shows the date of their enrollment and the `max_date` column shows the date of their latest follow-up visit (across all forms).
 
 ```{r delayed-participants}
-# Show participants with >24 days delayed follow-up
-latest_check %>% 
-  filter(past24 == TRUE) %>% 
+# Show current participants with >24 days delayed follow-up
+if(latest_check %>% 
+  filter(withdrawn == FALSE, completed = FALSE, past24 == TRUE) %>% 
+  nrow == 0) print("No current participants with >24 days delayed follow-up") else latest_check %>%
+  filter(withdrawn == FALSE, completed = FALSE, past24 == TRUE) %>%
   select(record_id, scr_elig_status, scr_date, scr_age, scr_sex,
-         vxf_arm, pst_complete, min_date, max_date, current_date, time_since_last, past24) %>% 
+         vxf_arm, min_date, max_date, current_date, time_since_last, past24) %>% 
   kable(caption = "Table 3: Participants with delayed follow-up (>24 days)") %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
 
 # Add button to download table
-latest_check %>%
+if(latest_check %>% 
+  filter(withdrawn == FALSE, completed = FALSE, past24 == TRUE) %>% 
+  nrow == 0) print("No table to download") else latest_check %>%
   download_this(
     output_name = "Cholera_CoP_delayed_visits",
     output_extension = ".csv",
@@ -253,9 +274,11 @@ all_events <- expand_grid(
   )
 
 # Merge current records with complete list of timepoints
-merge_events <- right_join(x = cholera_cop_dat, y = all_events) %>%
+merge_events <- right_join(x = cholera_cop_dat %>% 
+                             filter(withdrawn == FALSE),
+                           y = all_events) %>%
   arrange(record_id, days_past) %>%
-  fill(scr_date, scr_elig_status, vxf_arm, .direction = "down") %>%
+  fill(scr_date, scr_elig_status, vxf_arm, .direction = "downup") %>%
   filter(scr_elig_status == "Eligible") %>%
   group_by(record_id, redcap_event_name, vxf_arm, nickname) %>%
   mutate(
@@ -372,16 +395,24 @@ cohort_plot <- merge_events %>%
                date_breaks = "2 months",
                date_labels = "%Y %b") +
   scale_y_discrete(name = "Participant ID") +
-  scale_shape_manual(name = "Status",
-                     values = c(19, 17, 4, 1)) +
-  scale_color_manual(name = "Status",
-                     values = c("black", "grey50", "grey50", "grey50")) +
   scale_fill_viridis_d(name = "Visit (days)", option = "H") +
   labs(title = "Figure 1: Cohort plot") +
   theme_bw(base_size = 12) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1),
         axis.text.y = element_text(size = 6),
         plot.title.position = "plot")
+
+# Make sure that shapes are correct for the different status groups
+if(length(unique(merge_events$status_group)) == 3) cohort_plot <- cohort_plot +
+  scale_shape_manual(name = "Status",
+                     values = c(19, 4, 1)) +
+  scale_color_manual(name = "Status",
+                     values = c("black", "grey50", "grey50"))
+if(length(unique(merge_events$status_group)) == 4) cohort_plot +
+  scale_shape_manual(name = "Status",
+                     values = c(19, 17, 4, 1)) +
+  scale_color_manual(name = "Status",
+                     values = c("black", "grey50", "grey50", "grey50")) else cohort_plot <- cohort_plot
 
 # Make plot interactive with plotly
 # cohort_plotly <- ggplotly(cohort_plot)
